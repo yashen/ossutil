@@ -2023,6 +2023,17 @@ func (cc *CopyCommand) filterPath(filePath string, cpDir string) bool {
 	return !strings.Contains(absFile, absCPDir)
 }
 
+func (cc *CopyCommand) setFileLastModified(bucket *oss.Bucket, objectName string, filePath string) error {
+
+	if props, err := cc.command.ossGetObjectStatRetry(bucket, objectName, cc.cpOption.payerOptions...); err == nil {
+		lastModified, err := time.Parse(http.TimeFormat, props.Get(oss.HTTPHeaderLastModified))
+		if err == nil {
+			return os.Chtimes(filePath, lastModified, lastModified)
+		}
+	}
+	return nil
+}
+
 func (cc *CopyCommand) uploadFileWithReport(bucket *oss.Bucket, destURL CloudURL, file fileInfoType) error {
 	startT := time.Now()
 	skip, err, isDir, size, msg := cc.uploadFile(bucket, destURL, file)
@@ -2107,6 +2118,11 @@ func (cc *CopyCommand) uploadFile(bucket *oss.Bucket, destURL CloudURL, file fil
 		rerr = cc.ossUploadFileRetry(bucket, objectName, filePath, options...)
 		if err := cc.updateSnapshot(rerr, spath, srct); err != nil {
 			rerr = err
+			return
+		}
+		if err := cc.setFileLastModified(bucket, objectName, filePath); err != nil {
+			rerr = err
+			return
 		}
 		return
 	}
@@ -2124,6 +2140,11 @@ func (cc *CopyCommand) uploadFile(bucket *oss.Bucket, destURL CloudURL, file fil
 	rerr = cc.ossResumeUploadRetry(bucket, objectName, filePath, partSize, options...)
 	if err := cc.updateSnapshot(rerr, spath, srct); err != nil {
 		rerr = err
+		return
+	}
+	if err := cc.setFileLastModified(bucket, objectName, filePath); err != nil {
+		rerr = err
+		return
 	}
 	return
 }
@@ -2478,6 +2499,8 @@ func (cc *CopyCommand) downloadSingleFileWithReport(bucket *oss.Bucket, objectIn
 		}
 		objectKey := objectInfo.prefix + objectInfo.relativeKey
 		LogInfo("download success,object:%s,size:%d,speed:%.2f(KB/s),cost:%d(ms)\n", objectKey, realSize, speed, cost)
+		fileName := cc.makeFileName(objectInfo.relativeKey, filePath)
+		os.Chtimes(fileName, objectInfo.lastModified, objectInfo.lastModified)
 		cc.updateSnapshot(nil, CloudURLToString(bucket.BucketName, objectKey), objectInfo.lastModified.Unix())
 	}
 
