@@ -2023,17 +2023,6 @@ func (cc *CopyCommand) filterPath(filePath string, cpDir string) bool {
 	return !strings.Contains(absFile, absCPDir)
 }
 
-func (cc *CopyCommand) setFileLastModified(bucket *oss.Bucket, objectName string, filePath string) error {
-
-	if props, err := cc.command.ossGetObjectStatRetry(bucket, objectName, cc.cpOption.payerOptions...); err == nil {
-		lastModified, err := time.Parse(http.TimeFormat, props.Get(oss.HTTPHeaderLastModified))
-		if err == nil {
-			return os.Chtimes(filePath, lastModified, lastModified)
-		}
-	}
-	return nil
-}
-
 func (cc *CopyCommand) uploadFileWithReport(bucket *oss.Bucket, destURL CloudURL, file fileInfoType) error {
 	startT := time.Now()
 	skip, err, isDir, size, msg := cc.uploadFile(bucket, destURL, file)
@@ -2115,14 +2104,10 @@ func (cc *CopyCommand) uploadFile(bucket *oss.Bucket, destURL CloudURL, file fil
 		var listener *OssProgressListener = &OssProgressListener{&cc.monitor, 0, 0, false}
 		options := cc.cpOption.options
 		options = append(options, oss.Progress(listener))
+		options = append(options, oss.Meta("LastModified", strconv.FormatInt(f.ModTime().Unix(), 10)))
 		rerr = cc.ossUploadFileRetry(bucket, objectName, filePath, options...)
 		if err := cc.updateSnapshot(rerr, spath, srct); err != nil {
 			rerr = err
-			return
-		}
-		if err := cc.setFileLastModified(bucket, objectName, filePath); err != nil {
-			rerr = err
-			return
 		}
 		return
 	}
@@ -2137,14 +2122,10 @@ func (cc *CopyCommand) uploadFile(bucket *oss.Bucket, destURL CloudURL, file fil
 	cp := oss.CheckpointDir(true, cc.cpOption.cpDir)
 	options := cc.cpOption.options
 	options = append(options, oss.Routines(rt), cp, oss.Progress(listener))
+	options = append(options, oss.Meta("LastModified", strconv.FormatInt(f.ModTime().Unix(), 10)))
 	rerr = cc.ossResumeUploadRetry(bucket, objectName, filePath, partSize, options...)
 	if err := cc.updateSnapshot(rerr, spath, srct); err != nil {
 		rerr = err
-		return
-	}
-	if err := cc.setFileLastModified(bucket, objectName, filePath); err != nil {
-		rerr = err
-		return
 	}
 	return
 }
@@ -2158,6 +2139,25 @@ func (cc *CopyCommand) makeObjectName(destURL CloudURL, file fileInfoType) strin
 		return destURL.object + filePath
 	}
 	return destURL.object
+}
+
+func (cc *CopyCommand) getClientLastModified(bucket *oss.Bucket, objectName string) *time.Time {
+	props, err := cc.command.ossGetObjectStatRetry(bucket, objectName, cc.cpOption.payerOptions...)
+	if err != nil {
+		panic(err)
+	}
+
+	clientLastmodified := props.Get("x-oss-meta-lastmodified")
+	if clientLastmodified == "" {
+		return nil
+	}
+
+	if result, err := strconv.ParseInt(clientLastmodified, 10, 64); err == nil {
+		destt := time.Unix(result, 0)
+		return &destt
+	}
+
+	return nil
 }
 
 func (cc *CopyCommand) skipUpload(spath string, bucket *oss.Bucket, objectName string, destURL CloudURL, srcModifiedTime int64) (bool, error) {
@@ -2182,6 +2182,12 @@ func (cc *CopyCommand) skipUpload(spath string, bucket *oss.Bucket, objectName s
 		if cc.cpOption.update {
 			if props, err := cc.command.ossGetObjectStatRetry(bucket, objectName, cc.cpOption.payerOptions...); err == nil {
 				destt, err := time.Parse(http.TimeFormat, props.Get(oss.HTTPHeaderLastModified))
+
+				clientLastmodified := cc.getClientLastModified(bucket, objectName)
+				if clientLastmodified != nil {
+					destt = *clientLastmodified
+				}
+
 				if err == nil && destt.Unix() >= srcModifiedTime {
 					return true, nil
 				}
@@ -2871,6 +2877,12 @@ func (cc *CopyCommand) objectProducer(bucket *oss.Bucket, cloudURL CloudURL, chO
 							object.Size = size
 						}
 					}
+
+					clientLastModified := cc.getClientLastModified(bucket, object.Key)
+					if clientLastModified != nil {
+						object.LastModified = *clientLastModified
+					}
+
 					chObjects <- objectInfoType{prefix, relativeKey, int64(object.Size), object.LastModified}
 				}
 			}
